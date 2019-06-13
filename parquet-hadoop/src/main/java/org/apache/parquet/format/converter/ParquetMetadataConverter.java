@@ -18,9 +18,13 @@
  */
 package org.apache.parquet.format.converter;
 
+import static org.apache.parquet.format.Util.readColumnMetaData;
 import static org.apache.parquet.format.Util.readFileMetaData;
+import static org.apache.parquet.format.Util.writeColumnMetaData;
 import static org.apache.parquet.format.Util.writePageHeader;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -38,6 +42,15 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.parquet.CorruptStatistics;
+import org.apache.parquet.ShouldNeverHappenException;
+import org.apache.parquet.crypto.AesEncryptor;
+import org.apache.parquet.crypto.InternalColumnDecryptionSetup;
+import org.apache.parquet.crypto.InternalColumnEncryptionSetup;
+import org.apache.parquet.crypto.InternalFileDecryptor;
+import org.apache.parquet.crypto.InternalFileEncryptor;
+import org.apache.parquet.format.BlockCipher;
+import org.apache.parquet.format.ColumnCryptoMetaData;
+import org.apache.parquet.format.EncryptionWithColumnKey;
 import org.apache.parquet.format.PageEncodingStats;
 import org.apache.parquet.hadoop.metadata.ColumnPath;
 import org.apache.parquet.format.ColumnChunk;
@@ -62,6 +75,7 @@ import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 import org.apache.parquet.column.EncodingStats;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.io.ParquetDecodingException;
+import org.apache.parquet.io.SeekableInputStream;
 import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.OriginalType;
@@ -106,12 +120,22 @@ public class ParquetMetadataConverter {
       cachedEncodingSets = new ConcurrentHashMap<Set<org.apache.parquet.column.Encoding>, Set<org.apache.parquet.column.Encoding>>();
 
   public FileMetaData toParquetMetadata(int currentVersion, ParquetMetadata parquetMetadata) {
+    try {
+      return toParquetMetadata(currentVersion, parquetMetadata, (InternalFileEncryptor) null);
+    } catch (IOException e) {
+      // Doesn't happen. Exception can be thrown only with encryption.
+      throw new ShouldNeverHappenException();
+    }
+  }
+
+  public FileMetaData toParquetMetadata(int currentVersion, ParquetMetadata parquetMetadata,
+                                        InternalFileEncryptor fileEncryptor) throws IOException {
     List<BlockMetaData> blocks = parquetMetadata.getBlocks();
     List<RowGroup> rowGroups = new ArrayList<RowGroup>();
     long numRows = 0;
     for (BlockMetaData block : blocks) {
       numRows += block.getRowCount();
-      addRowGroup(parquetMetadata, rowGroups, block);
+      addRowGroup(parquetMetadata, rowGroups, block, fileEncryptor);
     }
     FileMetaData fileMetaData = new FileMetaData(
         currentVersion,
@@ -182,28 +206,69 @@ public class ParquetMetadataConverter {
     });
   }
 
-  private void addRowGroup(ParquetMetadata parquetMetadata, List<RowGroup> rowGroups, BlockMetaData block) {
+  private void addRowGroup(ParquetMetadata parquetMetadata, List<RowGroup> rowGroups, BlockMetaData block,
+                           InternalFileEncryptor fileEncryptor) throws IOException {
     //rowGroup.total_byte_size = ;
     List<ColumnChunkMetaData> columns = block.getColumns();
     List<ColumnChunk> parquetColumns = new ArrayList<ColumnChunk>();
+    short rowGroupOrdinal = (short) rowGroups.size();
+    short columnOrdinal = -1;
+    ByteArrayOutputStream tempOutStream = null;
     for (ColumnChunkMetaData columnMetaData : columns) {
       ColumnChunk columnChunk = new ColumnChunk(columnMetaData.getFirstDataPageOffset()); // verify this is the right offset
       columnChunk.file_path = block.getPath(); // they are in the same file for now
-      columnChunk.meta_data = new ColumnMetaData(
+      InternalColumnEncryptionSetup columnSetup = null;
+      boolean writeCryptoMetadata = false;
+      boolean encryptMetaData = false;
+      ColumnPath path = columnMetaData.getPath();
+      if (null != fileEncryptor) {
+        columnOrdinal++;
+        columnSetup = fileEncryptor.getColumnSetup(path, false, columnOrdinal);
+        writeCryptoMetadata = columnSetup.isEncrypted();
+        encryptMetaData = fileEncryptor.encryptColumnMetaData(columnSetup);
+      }
+      ColumnMetaData metaData = new ColumnMetaData(
           getType(columnMetaData.getType()),
           toFormatEncodings(columnMetaData.getEncodings()),
-          Arrays.asList(columnMetaData.getPath().toArray()),
+          Arrays.asList(path.toArray()),
           columnMetaData.getCodec().getParquetCompressionCodec(),
           columnMetaData.getValueCount(),
           columnMetaData.getTotalUncompressedSize(),
           columnMetaData.getTotalSize(),
           columnMetaData.getFirstDataPageOffset());
-      columnChunk.meta_data.dictionary_page_offset = columnMetaData.getDictionaryPageOffset();
+      metaData.dictionary_page_offset = columnMetaData.getDictionaryPageOffset();
       if (!columnMetaData.getStatistics().isEmpty()) {
-        columnChunk.meta_data.setStatistics(toParquetStatistics(columnMetaData.getStatistics()));
+        metaData.setStatistics(toParquetStatistics(columnMetaData.getStatistics()));
       }
       if (columnMetaData.getEncodingStats() != null) {
-        columnChunk.meta_data.setEncoding_stats(convertEncodingStats(columnMetaData.getEncodingStats()));
+        metaData.setEncoding_stats(convertEncodingStats(columnMetaData.getEncodingStats()));
+      }
+
+      if (!encryptMetaData) {
+        columnChunk.setMeta_data(metaData);
+      }
+      else {
+        // Serialize and encrypt ColumnMetadata separately
+        byte[] columnMetaDataAAD = AesEncryptor.createModuleAAD(fileEncryptor.getFileAAD(),
+            AesEncryptor.ColumnMetaData, rowGroupOrdinal, columnSetup.getOrdinal(), (short) -1);
+        if (null == tempOutStream) {
+          tempOutStream = new ByteArrayOutputStream();
+        }
+        else {
+          tempOutStream.reset();
+        }
+        writeColumnMetaData(metaData, tempOutStream, columnSetup.getMetaDataEncryptor(), columnMetaDataAAD);
+        columnChunk.setEncrypted_column_metadata(tempOutStream.toByteArray());
+        // Keep redacted metadata version for old readers
+        if (!fileEncryptor.isFooterEncrypted()) {
+          ColumnMetaData metaDataRedacted  = metaData.deepCopy();
+          if (metaDataRedacted.isSetStatistics()) metaDataRedacted.unsetStatistics();
+          if (metaDataRedacted.isSetEncoding_stats()) metaDataRedacted.unsetEncoding_stats();
+          columnChunk.setMeta_data(metaDataRedacted);
+        }
+      }
+      if (writeCryptoMetadata) {
+        columnChunk.setCrypto_metadata(columnSetup.getColumnCryptoMetaData());
       }
 //      columnChunk.meta_data.index_page_offset = ;
 //      columnChunk.meta_data.key_value_metadata = ; // nothing yet
@@ -211,6 +276,8 @@ public class ParquetMetadataConverter {
       parquetColumns.add(columnChunk);
     }
     RowGroup rowGroup = new RowGroup(parquetColumns, block.getTotalByteSize(), block.getRowCount());
+    rowGroup.setTotal_compressed_size(block.getCompressedSize());
+    rowGroup.setOrdinal(rowGroupOrdinal);
     rowGroups.add(rowGroup);
   }
 
@@ -732,9 +799,18 @@ public class ParquetMetadataConverter {
     List<RowGroup> newRowGroups = new ArrayList<RowGroup>();
     for (RowGroup rowGroup : rowGroups) {
       long totalSize = 0;
-      long startIndex = getOffset(rowGroup.getColumns().get(0));
-      for (ColumnChunk col : rowGroup.getColumns()) {
-        totalSize += col.getMeta_data().getTotal_compressed_size();
+      long startIndex;
+      if (rowGroup.isSetFile_offset()) {
+        startIndex = rowGroup.getFile_offset();
+      } else {
+        startIndex = getOffset(rowGroup.getColumns().get(0));
+      }
+      if (rowGroup.isSetTotal_compressed_size()) {
+        totalSize = rowGroup.getTotal_compressed_size();
+      } else {
+        for (ColumnChunk col : rowGroup.getColumns()) {
+          totalSize += col.getMeta_data().getTotal_compressed_size();
+        }
       }
       long midPoint = startIndex + totalSize / 2;
       if (filter.contains(midPoint)) {
@@ -750,7 +826,12 @@ public class ParquetMetadataConverter {
     List<RowGroup> rowGroups = metaData.getRow_groups();
     List<RowGroup> newRowGroups = new ArrayList<RowGroup>();
     for (RowGroup rowGroup : rowGroups) {
-      long startIndex = getOffset(rowGroup.getColumns().get(0));
+      long startIndex;
+      if (rowGroup.isSetFile_offset()) {
+        startIndex = rowGroup.getFile_offset();
+      } else {
+        startIndex = getOffset(rowGroup.getColumns().get(0));
+      }
       if (filter.contains(startIndex)) {
         newRowGroups.add(rowGroup);
       }
@@ -760,6 +841,9 @@ public class ParquetMetadataConverter {
   }
 
   static long getOffset(RowGroup rowGroup) {
+    if (rowGroup.isSetFile_offset()) {
+      return rowGroup.getFile_offset();
+    }
     return getOffset(rowGroup.getColumns().get(0));
   }
   // Visible for testing
@@ -772,26 +856,164 @@ public class ParquetMetadataConverter {
     return offset;
   }
 
+  // Check footer integrity, process column cryptodata and decrypt ColumnMetaData - as necessary
+  private static void processCryptoMetaData(FileMetaData fileMetaData, InputStream from,
+                                            InternalFileDecryptor fileDecryptor, boolean encryptedFooter,
+                                            long footerOffset, int combinedFooterLength) throws IOException {
+
+    if (!encryptedFooter && !fileMetaData.isSetEncryption_algorithm()) { // Plaintext file
+      if (null != fileDecryptor) {
+        fileDecryptor.setPlaintextFile();
+        // Done to detect files that were not encrypted by mistake
+        if (!fileDecryptor.plaintextFilesAllowed()) {
+          throw new IOException("Applying decryptor on plaintext file");
+        }
+      }
+      return;
+    }
+
+    if (encryptedFooter && (null == fileDecryptor)) { // Encrypted file and footer
+      throw new IOException("File with encrypted footer. No keys available");
+    }
+
+    if (!encryptedFooter && (null != fileDecryptor)) { // Encrypted file, plaintext footer
+      fileDecryptor.setFileCryptoMetaData(fileMetaData.getEncryption_algorithm(), false, fileMetaData.getFooter_signing_key_metadata());
+
+      // Plaintext footer signature verification
+      if (fileDecryptor.checkFooterIntegrity()) {
+        AesEncryptor footerSigner = fileDecryptor.getSignedFooterEncryptor();
+        SeekableInputStream seekableInputStream = null;
+        seekableInputStream = (SeekableInputStream) from;
+        seekableInputStream.seek(footerOffset);
+
+        int footerSignatureLength = AesEncryptor.NONCE_LENGTH + AesEncryptor.GCM_TAG_LENGTH;
+        byte[] serializedFooter = new byte[combinedFooterLength - footerSignatureLength];
+        byte[] nonce = new byte[AesEncryptor.NONCE_LENGTH];
+        byte[] gcmTag = new byte[AesEncryptor.GCM_TAG_LENGTH];
+        seekableInputStream.readFully(serializedFooter);
+        seekableInputStream.readFully(nonce);
+        seekableInputStream.readFully(gcmTag);
+
+        byte[] signedFooterAAD = AesEncryptor.createFooterAAD(fileDecryptor.getFileAAD());
+        byte[] encryptedFooterBytes = footerSigner.encrypt(false, serializedFooter, nonce, signedFooterAAD);
+        footerSigner.wipeOut();
+        byte[] calculatedTag = new byte[AesEncryptor.GCM_TAG_LENGTH];
+        System.arraycopy(encryptedFooterBytes, encryptedFooterBytes.length - AesEncryptor.GCM_TAG_LENGTH,
+            calculatedTag, 0, AesEncryptor.GCM_TAG_LENGTH);
+        if (!Arrays.equals(gcmTag, calculatedTag)) throw new IOException("Signature mismatch in plaintext footer");
+      }
+    }
+
+    List<RowGroup> row_groups = fileMetaData.getRow_groups();
+    // Reading schema etc, not the data
+    if (null == row_groups) return;
+
+    // Parse column crypto metadata, and if needed, decrypt metadata
+    for (RowGroup rowGroup : row_groups) {
+      List<ColumnChunk> columns = rowGroup.getColumns();
+      short columnOrdinal = -1;
+      for (ColumnChunk columnChunk : columns) {
+        columnOrdinal++;
+        ColumnCryptoMetaData cryptoMetaData = columnChunk.getCrypto_metadata();
+        ColumnMetaData metaData = columnChunk.getMeta_data();
+        List<String> pathList;
+        ColumnPath columnPath;
+        // Plaintext column
+        if (null == cryptoMetaData) {
+          if (null == metaData) {
+            throw new IOException("ColumnMetaData not set in plaintext column");
+          }
+          if (null != fileDecryptor) {
+            pathList = metaData.getPath_in_schema();
+            columnPath = ColumnPath.get(pathList.toArray(new String[pathList.size()]));
+            // mark this column as plaintext in file decryptor
+            fileDecryptor.setColumnCryptoMetadata(columnPath, false, false, (byte[]) null, columnOrdinal);
+          }
+          continue;
+        }
+        // Encrypted column
+        boolean encryptedWithFooterKey = cryptoMetaData.isSetENCRYPTION_WITH_FOOTER_KEY();
+        // Encrypted with footer key
+        if (encryptedWithFooterKey) {
+          if (!encryptedFooter) {
+            throw new IOException("Column encrypted with footer key in file with plaintext footer");
+          }
+          if (null == metaData) {
+            throw new IOException("ColumnMetaData not set in Encryption with Footer key");
+          }
+          if (null == fileDecryptor) {
+            throw new IOException("Column encrypted with footer key: No keys available");
+          }
+          pathList = metaData.getPath_in_schema();
+          columnPath = ColumnPath.get(pathList.toArray(new String[pathList.size()]));
+          fileDecryptor.setColumnCryptoMetadata(columnPath, true, true, (byte[]) null, columnOrdinal);
+          continue;
+        }
+        // Encrypted with column key
+        if (!encryptedFooter) columnChunk.unsetMeta_data(); // Plaintext footer file: unset duplicate metadata
+
+        if (null != fileDecryptor) {
+          EncryptionWithColumnKey columnKeyStruct = cryptoMetaData.getENCRYPTION_WITH_COLUMN_KEY();
+          pathList = columnKeyStruct.getPath_in_schema();
+          byte[] columnKeyMetadata = columnKeyStruct.getKey_metadata();
+          columnPath = ColumnPath.get(pathList.toArray(new String[pathList.size()]));
+          InternalColumnDecryptionSetup columnDecryptionSetup =
+              fileDecryptor.setColumnCryptoMetadata(columnPath, true, false, columnKeyMetadata, columnOrdinal);
+          // if column key is available, recover ColumnMetaData. Otherwise, ColumnMetaData is null - meaning a hidden column.
+          if (columnDecryptionSetup.isKeyAvailable()) {
+            ByteArrayInputStream tempInputStream = new ByteArrayInputStream(columnChunk.getEncrypted_column_metadata());
+            byte[] columnMetaDataAAD = AesEncryptor.createModuleAAD(fileDecryptor.getFileAAD(), AesEncryptor.ColumnMetaData,
+                rowGroup.getOrdinal(), columnOrdinal, (short) -1);
+            metaData = readColumnMetaData(tempInputStream, columnDecryptionSetup.getMetaDataDecryptor(), columnMetaDataAAD);
+            columnChunk.setMeta_data(metaData);
+          }
+        }
+      }
+      if (null != fileDecryptor) {
+        fileDecryptor.allColumnCryptoMetaDataProcessed();
+      }
+    }
+  }
+
   public ParquetMetadata readParquetMetadata(final InputStream from, MetadataFilter filter) throws IOException {
+    return readParquetMetadata(from, filter, (InternalFileDecryptor) null, false, 0, 0);
+  }
+
+  public ParquetMetadata readParquetMetadata(final InputStream from, MetadataFilter filter,
+                                             final InternalFileDecryptor fileDecryptor, final boolean encryptedFooter,
+                                             final long footerOffset, final int combinedFooterLength) throws IOException {
+
+    final BlockCipher.Decryptor footerDecryptor = (encryptedFooter? fileDecryptor.getFooterDecryptor() : null);
+    final byte[] encryptedFooterAAD = (encryptedFooter? AesEncryptor.createFooterAAD(fileDecryptor.getFileAAD()) : null);
+
     FileMetaData fileMetaData = filter.accept(new MetadataFilterVisitor<FileMetaData, IOException>() {
       @Override
       public FileMetaData visit(NoFilter filter) throws IOException {
-        return readFileMetaData(from);
+        FileMetaData fileMetaData = readFileMetaData(from, footerDecryptor, encryptedFooterAAD);
+        // Check footer integrity (for signed plaintext footers), and decrypt ColumnMetaData (when required)
+        processCryptoMetaData(fileMetaData, from, fileDecryptor, encryptedFooter, footerOffset, combinedFooterLength);
+        return fileMetaData;
       }
 
       @Override
       public FileMetaData visit(SkipMetadataFilter filter) throws IOException {
-        return readFileMetaData(from, true);
+        FileMetaData fileMetaData =  readFileMetaData(from, true, footerDecryptor, encryptedFooterAAD);
+        processCryptoMetaData(fileMetaData, from, fileDecryptor, encryptedFooter, footerOffset, combinedFooterLength);
+        return fileMetaData;
       }
 
       @Override
       public FileMetaData visit(OffsetMetadataFilter filter) throws IOException {
-        return filterFileMetaDataByStart(readFileMetaData(from), filter);
+        FileMetaData fileMetaData = readFileMetaData(from, footerDecryptor, encryptedFooterAAD);
+        processCryptoMetaData(fileMetaData, from, fileDecryptor, encryptedFooter, footerOffset, combinedFooterLength);
+        return filterFileMetaDataByStart(fileMetaData, filter);
       }
 
       @Override
       public FileMetaData visit(RangeMetadataFilter filter) throws IOException {
-        return filterFileMetaDataByMidpoint(readFileMetaData(from), filter);
+        FileMetaData fileMetaData = readFileMetaData(from, footerDecryptor, encryptedFooterAAD);
+        processCryptoMetaData(fileMetaData, from, fileDecryptor, encryptedFooter, footerOffset, combinedFooterLength);
+        return filterFileMetaDataByMidpoint(fileMetaData, filter);
       }
     });
     LOG.debug("{}", fileMetaData);
@@ -806,7 +1028,8 @@ public class ParquetMetadataConverter {
     List<RowGroup> row_groups = parquetMetadata.getRow_groups();
     if (row_groups != null) {
       for (RowGroup rowGroup : row_groups) {
-        BlockMetaData blockMetaData = new BlockMetaData();
+        BlockMetaData blockMetaData = new BlockMetaData(rowGroup.getFile_offset(), rowGroup.getTotal_compressed_size());
+        blockMetaData.setOrdinal(rowGroup.getOrdinal());
         blockMetaData.setRowCount(rowGroup.getNum_rows());
         blockMetaData.setTotalByteSize(rowGroup.getTotal_byte_size());
         List<ColumnChunk> columns = rowGroup.getColumns();
@@ -817,22 +1040,33 @@ public class ParquetMetadataConverter {
             throw new ParquetDecodingException("all column chunks of the same row group must be in the same file for now");
           }
           ColumnMetaData metaData = columnChunk.meta_data;
-          ColumnPath path = getPath(metaData);
-          ColumnChunkMetaData column = ColumnChunkMetaData.get(
-              path,
-              messageType.getType(path.toArray()).asPrimitiveType().getPrimitiveTypeName(),
-              CompressionCodecName.fromParquet(metaData.codec),
-              convertEncodingStats(metaData.getEncoding_stats()),
-              fromFormatEncodings(metaData.encodings),
-              fromParquetStatistics(
-                  parquetMetadata.getCreated_by(),
-                  metaData.statistics,
-                  messageType.getType(path.toArray()).asPrimitiveType()),
-              metaData.data_page_offset,
-              metaData.dictionary_page_offset,
-              metaData.num_values,
-              metaData.total_compressed_size,
-              metaData.total_uncompressed_size);
+          ColumnChunkMetaData column = null;
+
+          if (null != metaData) { // unencrypted, or successfully decrypted
+            ColumnPath path = getPath(metaData);
+            column = ColumnChunkMetaData.get(
+                path,
+                messageType.getType(path.toArray()).asPrimitiveType().getPrimitiveTypeName(),
+                CompressionCodecName.fromParquet(metaData.codec),
+                convertEncodingStats(metaData.getEncoding_stats()),
+                fromFormatEncodings(metaData.encodings),
+                fromParquetStatistics(
+                    parquetMetadata.getCreated_by(),
+                    metaData.statistics,
+                    messageType.getType(path.toArray()).asPrimitiveType()),
+                metaData.data_page_offset,
+                metaData.dictionary_page_offset,
+                metaData.num_values,
+                metaData.total_compressed_size,
+                metaData.total_uncompressed_size);
+            column.setRowGroupOrdinal(rowGroup.getOrdinal());
+          } else { // encrypted column, no key available
+            EncryptionWithColumnKey columnCryptoStructure = columnChunk.getCrypto_metadata().getENCRYPTION_WITH_COLUMN_KEY();
+            List<String> pathList = columnCryptoStructure.getPath_in_schema();
+            String[] columnPath = pathList.toArray(new String[pathList.size()]);
+            ColumnPath path = ColumnPath.get(columnPath);
+            column = ColumnChunkMetaData.getHiddenColumn(path);
+          }
           // TODO
           // index_page_offset
           // key_value_metadata
@@ -944,10 +1178,25 @@ public class ParquetMetadataConverter {
       org.apache.parquet.column.Encoding dlEncoding,
       org.apache.parquet.column.Encoding valuesEncoding,
       OutputStream to) throws IOException {
+    writeDataPageHeader(uncompressedSize, compressedSize, valueCount, statistics, rlEncoding, dlEncoding,
+        valuesEncoding, to, null, null);
+  }
+
+  public void writeDataPageHeader(
+      int uncompressedSize,
+      int compressedSize,
+      int valueCount,
+      org.apache.parquet.column.statistics.Statistics statistics,
+      org.apache.parquet.column.Encoding rlEncoding,
+      org.apache.parquet.column.Encoding dlEncoding,
+      org.apache.parquet.column.Encoding valuesEncoding,
+      OutputStream to,
+      BlockCipher.Encryptor blockEncryptor,
+      byte[] AAD) throws IOException {
     writePageHeader(
         newDataPageHeader(uncompressedSize, compressedSize, valueCount, statistics,
             rlEncoding, dlEncoding, valuesEncoding),
-        to);
+        to, blockEncryptor, AAD);
   }
 
   private PageHeader newDataPageHeader(
@@ -978,13 +1227,27 @@ public class ParquetMetadataConverter {
       org.apache.parquet.column.Encoding dataEncoding,
       int rlByteLength, int dlByteLength,
       OutputStream to) throws IOException {
+    writeDataPageV2Header(uncompressedSize, compressedSize,
+        valueCount, nullCount, rowCount, statistics, dataEncoding,
+        rlByteLength, dlByteLength, to,
+        (BlockCipher.Encryptor) null, (byte[]) null);
+  }
+
+  public void writeDataPageV2Header(
+      int uncompressedSize, int compressedSize,
+      int valueCount, int nullCount, int rowCount,
+      org.apache.parquet.column.statistics.Statistics statistics,
+      org.apache.parquet.column.Encoding dataEncoding,
+      int rlByteLength, int dlByteLength,
+      OutputStream to, BlockCipher.Encryptor blockEncryptor,
+      byte[] AAD) throws IOException {
     writePageHeader(
         newDataPageV2Header(
             uncompressedSize, compressedSize,
             valueCount, nullCount, rowCount,
             statistics,
             dataEncoding,
-            rlByteLength, dlByteLength), to);
+            rlByteLength, dlByteLength), to, blockEncryptor, AAD);
   }
 
   private PageHeader newDataPageV2Header(
@@ -1008,11 +1271,19 @@ public class ParquetMetadataConverter {
   }
 
   public void writeDictionaryPageHeader(
+          int uncompressedSize, int compressedSize, int valueCount,
+          org.apache.parquet.column.Encoding valuesEncoding, OutputStream to) throws IOException {
+    writeDictionaryPageHeader(uncompressedSize, compressedSize, valueCount,
+        valuesEncoding, to, null, null);
+  }
+
+  public void writeDictionaryPageHeader(
       int uncompressedSize, int compressedSize, int valueCount,
-      org.apache.parquet.column.Encoding valuesEncoding, OutputStream to) throws IOException {
+      org.apache.parquet.column.Encoding valuesEncoding, OutputStream to,
+      BlockCipher.Encryptor blockEncryptor, byte[] AAD) throws IOException {
     PageHeader pageHeader = new PageHeader(PageType.DICTIONARY_PAGE, uncompressedSize, compressedSize);
     pageHeader.setDictionary_page_header(new DictionaryPageHeader(valueCount, getEncoding(valuesEncoding)));
-    writePageHeader(pageHeader, to);
+    writePageHeader(pageHeader, to, blockEncryptor, AAD);
   }
 
 }

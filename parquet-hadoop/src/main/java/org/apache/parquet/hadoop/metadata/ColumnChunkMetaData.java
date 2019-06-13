@@ -24,13 +24,22 @@ import org.apache.parquet.column.Encoding;
 import org.apache.parquet.column.EncodingStats;
 import org.apache.parquet.column.statistics.BooleanStatistics;
 import org.apache.parquet.column.statistics.Statistics;
+import org.apache.parquet.crypto.HiddenColumnException;
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
+
+import static org.apache.parquet.column.Encoding.PLAIN_DICTIONARY;
+import static org.apache.parquet.column.Encoding.RLE_DICTIONARY;
 
 /**
  * Column meta data for a block stored in the file footer and passed in the InputSplit
  * @author Julien Le Dem
  */
 abstract public class ColumnChunkMetaData {
+
+  // Hidden is an encrypted column for which the reader doesn't have a key
+  protected boolean hiddenColumn;
+  protected ColumnPath path;
+  private short rowGroupOrdinal = -1;
 
   @Deprecated
   public static ColumnChunkMetaData get(
@@ -105,10 +114,27 @@ abstract public class ColumnChunkMetaData {
     }
   }
 
+  public static ColumnChunkMetaData getHiddenColumn(ColumnPath path) {
+    return new HiddenColumnChunkMetaData(path);
+  }
+
+  public boolean isHiddenColumn() {
+    return hiddenColumn;
+  }
+
+  public void setRowGroupOrdinal (short rowGroupOrdinal) {
+    this.rowGroupOrdinal = rowGroupOrdinal;
+  }
+
+  public short getRowGroupOrdinal() {
+    return rowGroupOrdinal;
+  }
+
   /**
    * @return the offset of the first byte in the chunk
    */
   public long getStartingPos() {
+    if (hiddenColumn) throw new HiddenColumnException(path.toArray());
     long dictionaryPageOffset = getDictionaryPageOffset();
     long firstDataPageOffset = getFirstDataPageOffset();
     if (dictionaryPageOffset > 0 && dictionaryPageOffset < firstDataPageOffset) {
@@ -143,6 +169,7 @@ abstract public class ColumnChunkMetaData {
   }
 
   public CompressionCodecName getCodec() {
+    if (hiddenColumn) throw new HiddenColumnException(path.toArray());
     return properties.getCodec();
   }
 
@@ -151,6 +178,7 @@ abstract public class ColumnChunkMetaData {
    * @return column identifier
    */
   public ColumnPath getPath() {
+    if (hiddenColumn) return path;
     return properties.getPath();
   }
 
@@ -158,6 +186,7 @@ abstract public class ColumnChunkMetaData {
    * @return type of the column
    */
   public PrimitiveTypeName getType() {
+    if (hiddenColumn) throw new HiddenColumnException(path.toArray());
     return properties.getType();
   }
 
@@ -195,16 +224,31 @@ abstract public class ColumnChunkMetaData {
    * @return all the encodings used in this column
    */
   public Set<Encoding> getEncodings() {
+    if (hiddenColumn) throw new HiddenColumnException(path.toArray());
     return properties.getEncodings();
   }
 
   public EncodingStats getEncodingStats() {
+    if (hiddenColumn) throw new HiddenColumnException(path.toArray());
     return encodingStats;
   }
 
   @Override
   public String toString() {
+    if (hiddenColumn) return "ColumnMetaData{" + path.toString() +" - Hidden column}";
     return "ColumnMetaData{" + properties.toString() + ", " + getFirstDataPageOffset() + "}";
+  }
+
+  public boolean hasDictionaryPage() {
+    EncodingStats stats = getEncodingStats();
+    if (stats != null) {
+      // ensure there is a dictionary page and that it is used to encode data pages
+      return stats.hasDictionaryPages() && stats.hasDictionaryEncodedPages();
+    }
+
+    Set<Encoding> encodings = getEncodings();
+    return (encodings.contains(PLAIN_DICTIONARY) || encodings.contains(RLE_DICTIONARY));
+    //return getDictionaryPageOffset() > 0; // TODO rm
   }
 }
 
@@ -248,6 +292,7 @@ class IntColumnChunkMetaData extends ColumnChunkMetaData {
     this.totalSize = positiveLongToInt(totalSize);
     this.totalUncompressedSize = positiveLongToInt(totalUncompressedSize);
     this.statistics = statistics;
+    this.hiddenColumn = false;
   }
 
   /**
@@ -353,6 +398,7 @@ class LongColumnChunkMetaData extends ColumnChunkMetaData {
     this.totalSize = totalSize;
     this.totalUncompressedSize = totalUncompressedSize;
     this.statistics = statistics;
+    this.hiddenColumn = false;
   }
 
   /**
@@ -395,6 +441,44 @@ class LongColumnChunkMetaData extends ColumnChunkMetaData {
    */
   public Statistics getStatistics() {
    return statistics;
+  }
+}
+
+class HiddenColumnChunkMetaData extends ColumnChunkMetaData {
+  HiddenColumnChunkMetaData(ColumnPath path) {
+    super((EncodingStats) null, (ColumnChunkProperties) null);
+    this.path = path;
+    this.hiddenColumn = true;
+  }
+
+  @Override
+  public long getFirstDataPageOffset() {
+    throw new HiddenColumnException(path.toArray());
+  }
+
+  @Override
+  public long getDictionaryPageOffset() {
+    throw new HiddenColumnException(path.toArray());
+  }
+
+  @Override
+  public long getValueCount() {
+    throw new HiddenColumnException(path.toArray());
+  }
+
+  @Override
+  public long getTotalUncompressedSize() {
+    throw new HiddenColumnException(path.toArray());
+  }
+
+  @Override
+  public long getTotalSize() {
+    throw new HiddenColumnException(path.toArray());
+  }
+
+  @Override
+  public Statistics getStatistics() {
+    throw new HiddenColumnException(path.toArray());
   }
 }
 

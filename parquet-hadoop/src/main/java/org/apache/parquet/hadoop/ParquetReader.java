@@ -18,7 +18,18 @@
  */
 package org.apache.parquet.hadoop;
 
-import static org.apache.parquet.Preconditions.checkNotNull;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.parquet.Preconditions;
+import org.apache.parquet.crypto.FileDecryptionProperties;
+import org.apache.parquet.filter.UnboundRecordFilter;
+import org.apache.parquet.filter2.compat.FilterCompat;
+import org.apache.parquet.filter2.compat.FilterCompat.Filter;
+import org.apache.parquet.format.converter.ParquetMetadataConverter;
+import org.apache.parquet.hadoop.api.ReadSupport;
+import org.apache.parquet.hadoop.util.HiddenFileFilter;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -26,17 +37,7 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileStatus;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-
-import org.apache.parquet.Preconditions;
-import org.apache.parquet.filter.UnboundRecordFilter;
-import org.apache.parquet.filter2.compat.FilterCompat;
-import org.apache.parquet.filter2.compat.FilterCompat.Filter;
-import org.apache.parquet.hadoop.api.ReadSupport;
-import org.apache.parquet.hadoop.util.HiddenFileFilter;
+import static org.apache.parquet.Preconditions.checkNotNull;
 
 /**
  * Read records from a Parquet file.
@@ -46,10 +47,12 @@ public class ParquetReader<T> implements Closeable {
 
   private final ReadSupport<T> readSupport;
   private final Configuration conf;
-  private final Iterator<Footer> footersIterator;
+//  private final Iterator<Footer> footersIterator;
+  private final Iterator<FileStatus> filesIterator;
   private final Filter filter;
 
   private InternalParquetRecordReader<T> reader;
+  private FileDecryptionProperties fileDecryptionProperties;
 
   /**
    * @param file the file to read
@@ -100,17 +103,28 @@ public class ParquetReader<T> implements Closeable {
   }
 
   private ParquetReader(Configuration conf,
+                        Path file,
+                        ReadSupport<T> readSupport,
+                        Filter filter) throws IOException {
+    this(conf, file, readSupport, filter, null);
+  }
+  private ParquetReader(Configuration conf,
                        Path file,
                        ReadSupport<T> readSupport,
-                       Filter filter) throws IOException {
+                       Filter filter,
+                        FileDecryptionProperties fileDecryptionProperties) throws IOException {
     this.readSupport = readSupport;
     this.filter = checkNotNull(filter, "filter");
     this.conf = conf;
 
     FileSystem fs = file.getFileSystem(conf);
     List<FileStatus> statuses = Arrays.asList(fs.listStatus(file, HiddenFileFilter.INSTANCE));
-    List<Footer> footers = ParquetFileReader.readAllFootersInParallelUsingSummaryFiles(conf, statuses, false);
-    this.footersIterator = footers.iterator();
+//    List<Footer> footers = ParquetFileReader.readAllFootersInParallelUsingSummaryFiles(conf, statuses, false, fileDecryptionProperties);
+//    this.footersIterator = footers.iterator();
+    this.filesIterator = statuses.iterator();
+    if (null != fileDecryptionProperties) {
+      this.fileDecryptionProperties = fileDecryptionProperties;
+    }
   }
 
   /**
@@ -135,11 +149,11 @@ public class ParquetReader<T> implements Closeable {
       reader.close();
       reader = null;
     }
-    if (footersIterator.hasNext()) {
-      Footer footer = footersIterator.next();
+    if (filesIterator.hasNext()) {
+      FileStatus file = filesIterator.next();
 
       ParquetFileReader fileReader = ParquetFileReader.open(
-          conf, footer.getFile(), footer.getParquetMetadata());
+          conf, file.getPath(), ParquetMetadataConverter.NO_FILTER, fileDecryptionProperties);
 
       // apply data filters
       fileReader.filterRowGroups(filter);
@@ -166,6 +180,7 @@ public class ParquetReader<T> implements Closeable {
     private final Path file;
     private Filter filter;
     protected Configuration conf;
+    FileDecryptionProperties fileDecryptionProperties = null;
 
     private Builder(ReadSupport<T> readSupport, Path path) {
       this.readSupport = checkNotNull(readSupport, "readSupport");
@@ -191,6 +206,11 @@ public class ParquetReader<T> implements Closeable {
       return this;
     }
 
+    public Builder<T> withDecryption(FileDecryptionProperties fileDecryptionProperties) {
+      this.fileDecryptionProperties = fileDecryptionProperties;
+      return this;
+    }
+
     protected ReadSupport<T> getReadSupport() {
       // if readSupport is null, the protected constructor must have been used
       Preconditions.checkArgument(readSupport != null,
@@ -199,7 +219,7 @@ public class ParquetReader<T> implements Closeable {
     }
 
     public ParquetReader<T> build() throws IOException {
-      return new ParquetReader<T>(conf, file, getReadSupport(), filter);
+      return new ParquetReader<T>(conf, file, getReadSupport(), filter, fileDecryptionProperties);
     }
   }
 }
