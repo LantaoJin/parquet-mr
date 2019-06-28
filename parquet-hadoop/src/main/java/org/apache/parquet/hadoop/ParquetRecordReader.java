@@ -25,7 +25,6 @@ import static org.apache.parquet.hadoop.ParquetInputFormat.SPLIT_FILES;
 import static org.apache.parquet.hadoop.ParquetInputFormat.getFilter;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -37,15 +36,14 @@ import org.apache.hadoop.mapred.Reporter;
 import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.RecordReader;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
-import org.apache.hadoop.mapreduce.TaskInputOutputContext;
 
 import org.apache.hadoop.mapreduce.lib.input.FileSplit;
 import org.apache.parquet.CorruptDeltaByteArrays;
 import org.apache.parquet.column.Encoding;
+import org.apache.parquet.crypto.FileDecryptionProperties;
 import org.apache.parquet.filter.UnboundRecordFilter;
 import org.apache.parquet.filter2.compat.FilterCompat;
 import org.apache.parquet.filter2.compat.FilterCompat.Filter;
-import org.apache.parquet.filter2.compat.RowGroupFilter.FilterLevel;
 import org.apache.parquet.format.converter.ParquetMetadataConverter.MetadataFilter;
 import org.apache.parquet.hadoop.api.ReadSupport;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
@@ -70,6 +68,7 @@ public class ParquetRecordReader<T> extends RecordReader<Void, T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(ParquetRecordReader.class);
   private final InternalParquetRecordReader<T> internalReader;
+  private final FileDecryptionProperties decryptProps;
 
   /**
    * @param readSupport Object which helps reads files of the given type, e.g. Thrift, Avro.
@@ -80,10 +79,29 @@ public class ParquetRecordReader<T> extends RecordReader<Void, T> {
 
   /**
    * @param readSupport Object which helps reads files of the given type, e.g. Thrift, Avro.
+   * @param decryptProps properties used when decrypt file or columns
+   */
+  public ParquetRecordReader(ReadSupport<T> readSupport, FileDecryptionProperties decryptProps) {
+    this(readSupport, FilterCompat.NOOP, decryptProps);
+  }
+
+  /**
+   * @param readSupport Object which helps reads files of the given type, e.g. Thrift, Avro.
    * @param filter for filtering individual records
    */
   public ParquetRecordReader(ReadSupport<T> readSupport, Filter filter) {
     internalReader = new InternalParquetRecordReader<T>(readSupport, filter);
+    decryptProps = null;
+  }
+
+  /**
+   * @param readSupport Object which helps reads files of the given type, e.g. Thrift, Avro.
+   * @param filter for filtering individual records
+   * @param decryptProps properties used when decrypt file or columns
+   */
+  public ParquetRecordReader(ReadSupport<T> readSupport, Filter filter, FileDecryptionProperties decryptProps) {
+    internalReader = new InternalParquetRecordReader<T>(readSupport, filter);
+    this.decryptProps = decryptProps;
   }
 
   /**
@@ -144,16 +162,17 @@ public class ParquetRecordReader<T> extends RecordReader<Void, T> {
                context.getClass().getCanonicalName()));
     }
 
-    initializeInternalReader(toParquetSplit(inputSplit), ContextUtil.getConfiguration(context));
+    initializeInternalReader(toParquetSplit(inputSplit), ContextUtil.getConfiguration(context), decryptProps);
   }
 
   public void initialize(InputSplit inputSplit, Configuration configuration, Reporter reporter)
       throws IOException, InterruptedException {
     BenchmarkCounter.initCounterFromReporter(reporter,configuration);
-    initializeInternalReader(toParquetSplit(inputSplit), configuration);
+    initializeInternalReader(toParquetSplit(inputSplit), configuration, decryptProps);
   }
 
-  private void initializeInternalReader(ParquetInputSplit split, Configuration configuration) throws IOException {
+  private void initializeInternalReader(ParquetInputSplit split, Configuration configuration,
+    FileDecryptionProperties decryptProps) throws IOException {
     Path path = split.getPath();
     long[] rowGroupOffsets = split.getRowGroupOffsets();
 
@@ -164,7 +183,7 @@ public class ParquetRecordReader<T> extends RecordReader<Void, T> {
 
     // open a reader with the metadata filter
     ParquetFileReader reader = ParquetFileReader.open(
-        configuration, path, metadataFilter);
+        configuration, path, metadataFilter, decryptProps);
 
     if (rowGroupOffsets != null) {
       // verify a row group was found for each offset

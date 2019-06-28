@@ -607,8 +607,24 @@ public class ParquetFileReader implements Closeable {
    */
   @Deprecated
   public ParquetFileReader(
+    Configuration configuration, FileMetaData fileMetaData,
+    Path filePath, List<BlockMetaData> blocks, List<ColumnDescriptor> columns) throws IOException {
+    this(configuration, fileMetaData, filePath, blocks, columns, null);
+  }
+
+  /**
+   * @param configuration the Hadoop conf
+   * @param fileMetaData fileMetaData for parquet file
+   * @param blocks the blocks to read
+   * @param columns the columns to read (their path)
+   * @param fileDecryptionProperties properties used to decrypt file or columns
+   * @throws IOException if the file can not be opened
+   */
+  @Deprecated
+  public ParquetFileReader(
       Configuration configuration, FileMetaData fileMetaData,
-      Path filePath, List<BlockMetaData> blocks, List<ColumnDescriptor> columns) throws IOException {
+      Path filePath, List<BlockMetaData> blocks, List<ColumnDescriptor> columns,
+      FileDecryptionProperties fileDecryptionProperties) throws IOException {
     this.converter = new ParquetMetadataConverter(configuration);
     this.conf = configuration;
     this.fileMetaData = fileMetaData;
@@ -620,6 +636,17 @@ public class ParquetFileReader implements Closeable {
       paths.put(ColumnPath.get(col.getPath()), col);
     }
     this.codecFactory = new CodecFactory(configuration);
+
+    if (null != fileDecryptionProperties) {
+      fileDecryptor = new InternalFileDecryptor(fileDecryptionProperties.deepCopy());
+    }
+    // read crypto metadata for fileDecryptor
+    readFooter(converter, fileStatus.getLen(), fileStatus.getPath().toString(), f,
+      NO_FILTER, fileDecryptionProperties, fileDecryptor);
+    if (null != fileDecryptionProperties && fileDecryptor.plaintextFile() && fileDecryptor.plaintextFilesAllowed()) {
+      // Plaintext file. No need in decryptor
+      fileDecryptor = null;
+    }
   }
 
   /**

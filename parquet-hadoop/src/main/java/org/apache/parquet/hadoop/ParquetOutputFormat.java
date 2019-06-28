@@ -24,6 +24,9 @@ import static org.apache.parquet.hadoop.util.ContextUtil.getConfiguration;
 
 import java.io.IOException;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.HashMap;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.JobConf;
@@ -36,10 +39,13 @@ import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 
 import org.apache.parquet.column.ParquetProperties;
 import org.apache.parquet.column.ParquetProperties.WriterVersion;
+import org.apache.parquet.crypto.ColumnEncryptionProperties;
+import org.apache.parquet.crypto.FileEncryptionProperties;
 import org.apache.parquet.hadoop.ParquetFileWriter.Mode;
 import org.apache.parquet.hadoop.api.WriteSupport;
 import org.apache.parquet.hadoop.api.WriteSupport.WriteContext;
 import org.apache.parquet.hadoop.codec.CodecConfig;
+import org.apache.parquet.hadoop.metadata.ColumnPath;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 import org.apache.parquet.hadoop.util.ConfigurationUtil;
 import org.slf4j.Logger;
@@ -118,6 +124,12 @@ public class ParquetOutputFormat<T> extends FileOutputFormat<Void, T> {
   public static final String MIN_ROW_COUNT_FOR_PAGE_SIZE_CHECK = "parquet.page.size.row.check.min";
   public static final String MAX_ROW_COUNT_FOR_PAGE_SIZE_CHECK = "parquet.page.size.row.check.max";
   public static final String ESTIMATE_PAGE_SIZE_CHECK = "parquet.page.size.check.estimate";
+  public static final String CRYPTO_FOOTER = "parquet.crypto.footer";
+  public static final String CRYPTO_COLUMNS = "parquet.crypto.columns";
+  public static final String CRYPTO_FOOTER_KEY = "parquet.crypto.footer.key";
+  public static final String CRYPTO_COLUMN_KEY = "parquet.crypto.column.key";
+  public static final String CRYPTO_FOOTER_KEY_VERSION = "parquet.crypto.footer.key.version";
+  public static final String CRYPTO_COLUMN_KEY_VERSION = "parquet.crypto.column.key.version";
 
   // default to no padding for now
   private static final int DEFAULT_MAX_PADDING_SIZE = 0;
@@ -268,6 +280,34 @@ public class ParquetOutputFormat<T> extends FileOutputFormat<Void, T> {
     return conf.getInt(MAX_PADDING_BYTES, DEFAULT_MAX_PADDING_SIZE);
   }
 
+  private static boolean encryptFooter(Configuration conf) {
+    return conf.getBoolean(CRYPTO_FOOTER, false);
+  }
+
+  private static String[] getEncryptColumns(Configuration conf) {
+    String cryptoColumns = conf.get(CRYPTO_COLUMNS, null);
+    return cryptoColumns == null ? null : cryptoColumns.split(",");
+  }
+
+  private static byte[] getFooterKey(Configuration conf) {
+    String footerKey = conf.get(CRYPTO_FOOTER_KEY);
+    return footerKey == null ? null : Base64.getDecoder().decode(footerKey);
+  }
+
+  private static byte[] getColumnKey(Configuration conf) {
+    String columnKey = conf.get(CRYPTO_COLUMN_KEY);
+    return columnKey == null ? null : Base64.getDecoder().decode(columnKey);
+  }
+
+  private static byte[] getFooterKeyVersion(Configuration conf) {
+    String footerKeyVersion = conf.get(CRYPTO_FOOTER_KEY_VERSION);
+    return footerKeyVersion == null ? null : footerKeyVersion.getBytes(StandardCharsets.UTF_8);
+  }
+
+  private static byte[] getColumnKeyVersion(Configuration conf) {
+    String columnKeyVersion = conf.get(CRYPTO_COLUMN_KEY_VERSION);
+    return columnKeyVersion == null ? null : columnKeyVersion.getBytes(StandardCharsets.UTF_8);
+  }
 
   private WriteSupport<T> writeSupport;
   private ParquetOutputCommitter committer;
@@ -321,6 +361,30 @@ public class ParquetOutputFormat<T> extends FileOutputFormat<Void, T> {
         .withMaxRowCountForPageSizeCheck(getMaxRowCountForPageSizeCheck(conf))
         .build();
 
+    byte[] footerKey = getFooterKey(conf);
+    byte[] footerKeyVersion = getFooterKeyVersion(conf);
+    assert (footerKey != null && footerKeyVersion != null);
+    FileEncryptionProperties.Builder encryptPropsBuilder = FileEncryptionProperties
+      .builder(footerKey).withFooterKeyMetadata(footerKeyVersion);
+    if (!encryptFooter(conf)) encryptPropsBuilder.withPlaintextFooter();
+
+    byte[] columnKey = getColumnKey(conf);
+    String[] cryptoColumns = getEncryptColumns(conf);
+    byte[] colKeyVersion = getColumnKeyVersion(conf);
+    if (cryptoColumns != null && columnKey != null && colKeyVersion != null) {
+      HashMap<ColumnPath, ColumnEncryptionProperties> columnPropertiesMap = new HashMap<ColumnPath, ColumnEncryptionProperties>();
+      for (String columnName: cryptoColumns) {
+        ColumnEncryptionProperties columnProps = ColumnEncryptionProperties.builder(columnName)
+          .withKey(columnKey)
+          .withKeyMetaData(colKeyVersion)
+          .build();
+        columnPropertiesMap.put(columnProps.getPath(), columnProps);
+      }
+      encryptPropsBuilder.withEncryptedColumns(columnPropertiesMap);
+    }
+
+    FileEncryptionProperties encryptProps = encryptPropsBuilder.build();
+
     long blockSize = getLongBlockSize(conf);
     int maxPaddingSize = getMaxPaddingSize(conf);
     boolean validating = getValidation(conf);
@@ -340,7 +404,7 @@ public class ParquetOutputFormat<T> extends FileOutputFormat<Void, T> {
 
     WriteContext init = writeSupport.init(conf);
     ParquetFileWriter w = new ParquetFileWriter(
-        conf, init.getSchema(), file, Mode.CREATE, blockSize, maxPaddingSize);
+        conf, init.getSchema(), file, Mode.CREATE, blockSize, maxPaddingSize, encryptProps);
     w.start();
 
     float maxLoad = conf.getFloat(ParquetOutputFormat.MEMORY_POOL_RATIO,

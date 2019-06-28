@@ -53,6 +53,7 @@ public class AesEncryptor implements BlockCipher.Encryptor{
 
   public static final int NONCE_LENGTH = 12;
   public static final int GCM_TAG_LENGTH = 16;
+  //public static final int GCM_TAG_LENGTH = 32; // TODO
   public static final int SIZE_LENGTH = 4;
   
   static final int CTR_IV_LENGTH = 16;
