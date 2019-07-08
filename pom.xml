@@ -64,6 +64,14 @@
       <id>Twitter public Maven repo</id>
       <url>http://maven.twttr.com</url>
     </pluginRepository>
+    <!--<pluginRepository>-->
+      <!--<id>maven.tempo-db.com</id>-->
+      <!--<url>http://maven.oschina.net/service/local/repositories/sonatype-public-grid/content/</url>-->
+    <!--</pluginRepository>-->
+    <!--<pluginRepository>-->
+      <!--<id>p2.jfrog.org</id>-->
+      <!--<url>http://p2.jfrog.org/libs-releases</url>-->
+    <!--</pluginRepository>-->
   </pluginRepositories>
 
   <properties>

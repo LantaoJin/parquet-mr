@@ -361,29 +361,31 @@ public class ParquetOutputFormat<T> extends FileOutputFormat<Void, T> {
         .withMaxRowCountForPageSizeCheck(getMaxRowCountForPageSizeCheck(conf))
         .build();
 
+    FileEncryptionProperties encryptProps = null;
     byte[] footerKey = getFooterKey(conf);
     byte[] footerKeyVersion = getFooterKeyVersion(conf);
-    assert (footerKey != null && footerKeyVersion != null);
-    FileEncryptionProperties.Builder encryptPropsBuilder = FileEncryptionProperties
-      .builder(footerKey).withFooterKeyMetadata(footerKeyVersion);
-    if (!encryptFooter(conf)) encryptPropsBuilder.withPlaintextFooter();
+    if (footerKey != null && footerKeyVersion != null) {
+      FileEncryptionProperties.Builder encryptPropsBuilder = FileEncryptionProperties
+        .builder(footerKey).withFooterKeyMetadata(footerKeyVersion);
+      if (!encryptFooter(conf)) encryptPropsBuilder.withPlaintextFooter();
 
-    byte[] columnKey = getColumnKey(conf);
-    String[] cryptoColumns = getEncryptColumns(conf);
-    byte[] colKeyVersion = getColumnKeyVersion(conf);
-    if (cryptoColumns != null && columnKey != null && colKeyVersion != null) {
-      HashMap<ColumnPath, ColumnEncryptionProperties> columnPropertiesMap = new HashMap<ColumnPath, ColumnEncryptionProperties>();
-      for (String columnName: cryptoColumns) {
-        ColumnEncryptionProperties columnProps = ColumnEncryptionProperties.builder(columnName)
-          .withKey(columnKey)
-          .withKeyMetaData(colKeyVersion)
-          .build();
-        columnPropertiesMap.put(columnProps.getPath(), columnProps);
+      byte[] columnKey = getColumnKey(conf);
+      String[] cryptoColumns = getEncryptColumns(conf);
+      byte[] colKeyVersion = getColumnKeyVersion(conf);
+      if (cryptoColumns != null && columnKey != null && colKeyVersion != null) {
+        HashMap<ColumnPath, ColumnEncryptionProperties> columnPropertiesMap =
+          new HashMap<ColumnPath, ColumnEncryptionProperties>();
+        for (String columnName : cryptoColumns) {
+          ColumnEncryptionProperties columnProps = ColumnEncryptionProperties.builder(columnName)
+            .withKey(columnKey)
+            .withKeyMetaData(colKeyVersion)
+            .build();
+          columnPropertiesMap.put(columnProps.getPath(), columnProps);
+        }
+        encryptPropsBuilder.withEncryptedColumns(columnPropertiesMap);
       }
-      encryptPropsBuilder.withEncryptedColumns(columnPropertiesMap);
+      encryptProps = encryptPropsBuilder.build();
     }
-
-    FileEncryptionProperties encryptProps = encryptPropsBuilder.build();
 
     long blockSize = getLongBlockSize(conf);
     int maxPaddingSize = getMaxPaddingSize(conf);
