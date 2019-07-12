@@ -41,6 +41,7 @@ import org.apache.parquet.column.ParquetProperties;
 import org.apache.parquet.column.ParquetProperties.WriterVersion;
 import org.apache.parquet.crypto.ColumnEncryptionProperties;
 import org.apache.parquet.crypto.FileEncryptionProperties;
+import org.apache.parquet.crypto.ParquetCipher;
 import org.apache.parquet.hadoop.ParquetFileWriter.Mode;
 import org.apache.parquet.hadoop.api.WriteSupport;
 import org.apache.parquet.hadoop.api.WriteSupport.WriteContext;
@@ -130,6 +131,7 @@ public class ParquetOutputFormat<T> extends FileOutputFormat<Void, T> {
   public static final String CRYPTO_COLUMN_KEY = "parquet.crypto.column.key";
   public static final String CRYPTO_FOOTER_KEY_VERSION = "parquet.crypto.footer.key.version";
   public static final String CRYPTO_COLUMN_KEY_VERSION = "parquet.crypto.column.key.version";
+  public static final String CRYPTO_ALGORITHM = "parquet.crypto.algorithm";
 
   // default to no padding for now
   private static final int DEFAULT_MAX_PADDING_SIZE = 0;
@@ -309,6 +311,11 @@ public class ParquetOutputFormat<T> extends FileOutputFormat<Void, T> {
     return columnKeyVersion == null ? null : columnKeyVersion.getBytes(StandardCharsets.UTF_8);
   }
 
+  private static ParquetCipher getCryptoAlgorithm(Configuration conf) {
+    String algorithm = conf.get(CRYPTO_ALGORITHM);
+    return ParquetCipher.fromConf(algorithm);
+  }
+
   private WriteSupport<T> writeSupport;
   private ParquetOutputCommitter committer;
 
@@ -367,6 +374,7 @@ public class ParquetOutputFormat<T> extends FileOutputFormat<Void, T> {
     if (footerKey != null && footerKeyVersion != null) {
       FileEncryptionProperties.Builder encryptPropsBuilder = FileEncryptionProperties
         .builder(footerKey).withFooterKeyMetadata(footerKeyVersion);
+      encryptPropsBuilder.withAlgorithm(getCryptoAlgorithm(conf));
       if (!encryptFooter(conf)) encryptPropsBuilder.withPlaintextFooter();
 
       byte[] columnKey = getColumnKey(conf);
