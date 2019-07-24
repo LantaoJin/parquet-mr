@@ -30,8 +30,11 @@ import java.util.Random;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.parquet.crypto.ColumnEncryptionProperties;
+import org.apache.parquet.crypto.DecryptMetadataKeyRetriever;
+import org.apache.parquet.crypto.EncryptKeyMetadataGenerator;
 import org.apache.parquet.crypto.FileDecryptionProperties;
 import org.apache.parquet.crypto.FileEncryptionProperties;
+import org.apache.parquet.crypto.KeyMetadataGenerator;
 import org.apache.parquet.crypto.ParquetCipher;
 import org.apache.parquet.crypto.StringKeyIdRetriever;
 import org.apache.parquet.example.data.Group;
@@ -54,7 +57,7 @@ public class TestEncryption {
     enforceEmptyDir(conf, root);
 
     Random random = new Random();
-    int numberOfEncryptionModes = 5;
+    int numberOfEncryptionModes = 6;
     FileEncryptionProperties[] encryptionPropertiesList = new FileEncryptionProperties[numberOfEncryptionModes];
     FileDecryptionProperties[] decryptionPropertiesList = new FileDecryptionProperties[numberOfEncryptionModes];
 
@@ -145,6 +148,34 @@ public class TestEncryption {
         .build();
     encryptionPropertiesList[4] = encryptionProperties;
     decryptionPropertiesList[4] = decryptionProperties; // Same decryption properties
+
+    // #5  Plaintext footer, default algorithm, key metadata, decrypt key retriever, AAD
+    byte[] kek = new byte[16];
+    random.nextBytes(kek);
+    KeyMetadataGenerator keyMetadataGenerator = new EncryptKeyMetadataGenerator(kek);
+    columnProperties0 = ColumnEncryptionProperties.builder("binary_field")
+      .withKey(columnKey0)
+      .withKeyMetaData(keyMetadataGenerator.genKeyMetadata(columnKey0))
+      .build();
+    columnProperties1 = ColumnEncryptionProperties.builder("int32_field")
+      .withKey(columnKey1)
+      .withKeyMetaData(keyMetadataGenerator.genKeyMetadata(columnKey1))
+      .build();
+    columnPropertiesMap = new HashMap<ColumnPath, ColumnEncryptionProperties>();
+    columnPropertiesMap.put(columnProperties0.getPath(), columnProperties0);
+    columnPropertiesMap.put(columnProperties1.getPath(), columnProperties1);
+    encryptionProperties = FileEncryptionProperties.builder(footerKey)
+      .withPlaintextFooter()
+      .withAADPrefix(AADPrefix)
+      .withEncryptedColumns(columnPropertiesMap)
+      .build();
+    DecryptMetadataKeyRetriever decryptMetadataKeyRetriever = new DecryptMetadataKeyRetriever(kek);
+    decryptionProperties = FileDecryptionProperties.builder()
+      .withFooterKey(footerKey)
+      .withKeyRetriever(decryptMetadataKeyRetriever)
+      .build();
+    encryptionPropertiesList[5] = encryptionProperties;
+    decryptionPropertiesList[5] = decryptionProperties; // Same decryption properties
 
 
     MessageType schema = parseMessageType(
