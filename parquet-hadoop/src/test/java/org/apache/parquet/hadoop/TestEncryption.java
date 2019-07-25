@@ -34,7 +34,8 @@ import org.apache.parquet.crypto.DecryptMetadataKeyRetriever;
 import org.apache.parquet.crypto.EncryptKeyMetadataGenerator;
 import org.apache.parquet.crypto.FileDecryptionProperties;
 import org.apache.parquet.crypto.FileEncryptionProperties;
-import org.apache.parquet.crypto.KeyMetadataGenerator;
+import org.apache.parquet.crypto.KeyIdAndDecryptKeyRetriever;
+import org.apache.parquet.crypto.KeyIdAndEncryptMetadataGenerator;
 import org.apache.parquet.crypto.ParquetCipher;
 import org.apache.parquet.crypto.StringKeyIdRetriever;
 import org.apache.parquet.example.data.Group;
@@ -57,7 +58,7 @@ public class TestEncryption {
     enforceEmptyDir(conf, root);
 
     Random random = new Random();
-    int numberOfEncryptionModes = 6;
+    int numberOfEncryptionModes = 7;
     FileEncryptionProperties[] encryptionPropertiesList = new FileEncryptionProperties[numberOfEncryptionModes];
     FileDecryptionProperties[] decryptionPropertiesList = new FileDecryptionProperties[numberOfEncryptionModes];
 
@@ -150,16 +151,16 @@ public class TestEncryption {
     decryptionPropertiesList[4] = decryptionProperties; // Same decryption properties
 
     // #5  Plaintext footer, default algorithm, key metadata, decrypt key retriever, AAD
-    byte[] kek = new byte[16];
-    random.nextBytes(kek);
-    KeyMetadataGenerator keyMetadataGenerator = new EncryptKeyMetadataGenerator(kek);
+    byte[] kek5 = new byte[16];
+    random.nextBytes(kek5);
+    EncryptKeyMetadataGenerator keyMetadataGen5 = new EncryptKeyMetadataGenerator(kek5);
     columnProperties0 = ColumnEncryptionProperties.builder("binary_field")
       .withKey(columnKey0)
-      .withKeyMetaData(keyMetadataGenerator.genKeyMetadata(columnKey0))
+      .withKeyMetaData(keyMetadataGen5.genKeyMetadata(columnKey0))
       .build();
     columnProperties1 = ColumnEncryptionProperties.builder("int32_field")
       .withKey(columnKey1)
-      .withKeyMetaData(keyMetadataGenerator.genKeyMetadata(columnKey1))
+      .withKeyMetaData(keyMetadataGen5.genKeyMetadata(columnKey1))
       .build();
     columnPropertiesMap = new HashMap<ColumnPath, ColumnEncryptionProperties>();
     columnPropertiesMap.put(columnProperties0.getPath(), columnProperties0);
@@ -169,13 +170,42 @@ public class TestEncryption {
       .withAADPrefix(AADPrefix)
       .withEncryptedColumns(columnPropertiesMap)
       .build();
-    DecryptMetadataKeyRetriever decryptMetadataKeyRetriever = new DecryptMetadataKeyRetriever(kek);
+    DecryptMetadataKeyRetriever retriever5 = new DecryptMetadataKeyRetriever(kek5);
     decryptionProperties = FileDecryptionProperties.builder()
       .withFooterKey(footerKey)
-      .withKeyRetriever(decryptMetadataKeyRetriever)
+      .withKeyRetriever(retriever5)
       .build();
     encryptionPropertiesList[5] = encryptionProperties;
     decryptionPropertiesList[5] = decryptionProperties; // Same decryption properties
+
+    // #6  Plaintext footer, default algorithm, key metadata, decrypt key retriever, AAD
+    byte[] kek6 = new byte[16];
+    random.nextBytes(kek6);
+    KeyIdAndEncryptMetadataGenerator keyMetadataGen6 = new KeyIdAndEncryptMetadataGenerator(kek6);
+    columnProperties0 = ColumnEncryptionProperties.builder("binary_field")
+      .withKey(columnKey0)
+      .withKeyMetaData(keyMetadataGen6.genKeyMetadata("kek", columnKey0))
+      .build();
+    columnProperties1 = ColumnEncryptionProperties.builder("int32_field")
+      .withKey(columnKey1)
+      .withKeyMetaData(keyMetadataGen6.genKeyMetadata("kek", columnKey1))
+      .build();
+    columnPropertiesMap = new HashMap<ColumnPath, ColumnEncryptionProperties>();
+    columnPropertiesMap.put(columnProperties0.getPath(), columnProperties0);
+    columnPropertiesMap.put(columnProperties1.getPath(), columnProperties1);
+    encryptionProperties = FileEncryptionProperties.builder(footerKey)
+      .withPlaintextFooter()
+      .withAADPrefix(AADPrefix)
+      .withEncryptedColumns(columnPropertiesMap)
+      .build();
+    KeyIdAndDecryptKeyRetriever retriever6 = new KeyIdAndDecryptKeyRetriever();
+    decryptionProperties = FileDecryptionProperties.builder()
+      .withFooterKey(footerKey)
+      .withKeyRetriever(retriever6)
+      .build();
+    retriever6.putKey("kek", kek6);
+    encryptionPropertiesList[6] = encryptionProperties;
+    decryptionPropertiesList[6] = decryptionProperties; // Same decryption properties
 
 
     MessageType schema = parseMessageType(
