@@ -16,9 +16,8 @@ public class KeyIdAndEncryptMetadataGenerator {
     this.encryptedKeyLength = NONCE_LENGTH + GCM_TAG_LENGTH * 2 + SIZE_LENGTH;
   }
 
-  public byte[] genKeyMetadata(String keyId, byte[] data) throws IOException {
+  public byte[] genKeyMetadata(byte[] keyIdBytes, byte[] data) throws IOException {
     byte[] encryptedKey = encryptor.encrypt(data, null);
-    byte[] keyIdBytes = keyId.getBytes(StandardCharsets.UTF_8);
     byte[] keyMetadata = new byte[encryptedKeyLength + keyIdBytes.length];
     System.arraycopy(encryptedKey, 0, keyMetadata, 0, encryptedKeyLength);
     System.arraycopy(keyIdBytes, 0, keyMetadata, encryptedKeyLength, keyIdBytes.length);

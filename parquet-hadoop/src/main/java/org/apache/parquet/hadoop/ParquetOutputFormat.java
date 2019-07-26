@@ -25,8 +25,10 @@ import static org.apache.parquet.hadoop.util.ContextUtil.getConfiguration;
 import java.io.IOException;
 
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.Random;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.JobConf;
@@ -39,8 +41,10 @@ import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 
 import org.apache.parquet.column.ParquetProperties;
 import org.apache.parquet.column.ParquetProperties.WriterVersion;
+import org.apache.parquet.crypto.AesEncryptor;
 import org.apache.parquet.crypto.ColumnEncryptionProperties;
 import org.apache.parquet.crypto.FileEncryptionProperties;
+import org.apache.parquet.crypto.KeyIdAndEncryptMetadataGenerator;
 import org.apache.parquet.crypto.ParquetCipher;
 import org.apache.parquet.hadoop.ParquetFileWriter.Mode;
 import org.apache.parquet.hadoop.api.WriteSupport;
@@ -132,6 +136,7 @@ public class ParquetOutputFormat<T> extends FileOutputFormat<Void, T> {
   public static final String CRYPTO_FOOTER_KEY_VERSION = "parquet.crypto.footer.key.version";
   public static final String CRYPTO_COLUMN_KEY_VERSION = "parquet.crypto.column.key.version";
   public static final String CRYPTO_ALGORITHM = "parquet.crypto.algorithm";
+  public static final String CRYPTO_KEK_ENABLED = "parquet.crypto.kek.enabled";
 
   // default to no padding for now
   private static final int DEFAULT_MAX_PADDING_SIZE = 0;
@@ -316,6 +321,10 @@ public class ParquetOutputFormat<T> extends FileOutputFormat<Void, T> {
     return ParquetCipher.fromConf(algorithm);
   }
 
+  private static boolean isKekEnabled(Configuration conf) {
+    return conf.getBoolean(CRYPTO_KEK_ENABLED, false);
+  }
+
   private WriteSupport<T> writeSupport;
   private ParquetOutputCommitter committer;
 
@@ -372,23 +381,40 @@ public class ParquetOutputFormat<T> extends FileOutputFormat<Void, T> {
     byte[] footerKey = getFooterKey(conf);
     byte[] footerKeyVersion = getFooterKeyVersion(conf);
     if (footerKey != null && footerKeyVersion != null) {
+      // it's going to encrypt something
       FileEncryptionProperties.Builder encryptPropsBuilder = FileEncryptionProperties
         .builder(footerKey).withFooterKeyMetadata(footerKeyVersion);
       encryptPropsBuilder.withAlgorithm(getCryptoAlgorithm(conf));
       if (!encryptFooter(conf)) encryptPropsBuilder.withPlaintextFooter();
 
-      byte[] columnKey = getColumnKey(conf);
       String[] cryptoColumns = getEncryptColumns(conf);
+      byte[] columnKey = getColumnKey(conf);
       byte[] colKeyVersion = getColumnKeyVersion(conf);
       if (cryptoColumns != null && columnKey != null && colKeyVersion != null) {
-        HashMap<ColumnPath, ColumnEncryptionProperties> columnPropertiesMap =
-          new HashMap<ColumnPath, ColumnEncryptionProperties>();
-        for (String columnName : cryptoColumns) {
-          ColumnEncryptionProperties columnProps = ColumnEncryptionProperties.builder(columnName)
-            .withKey(columnKey)
-            .withKeyMetaData(colKeyVersion)
-            .build();
-          columnPropertiesMap.put(columnProps.getPath(), columnProps);
+        // it's going to encrypt columns
+        HashMap<ColumnPath, ColumnEncryptionProperties> columnPropertiesMap = new HashMap<ColumnPath, ColumnEncryptionProperties>();
+        if (isKekEnabled(conf)) {
+          // kek is enabled, generate key per file and pass both encrypted key and keyVersion as metadata
+          byte[] colKeyThisFile = new byte[AesEncryptor.GCM_TAG_LENGTH];
+          Random random = new SecureRandom();
+          random.nextBytes(colKeyThisFile);
+          KeyIdAndEncryptMetadataGenerator keyMetadataGen = new KeyIdAndEncryptMetadataGenerator(columnKey);
+          for (String columnName : cryptoColumns) {
+            ColumnEncryptionProperties columnProps = ColumnEncryptionProperties.builder(columnName)
+              .withKey(colKeyThisFile)
+              .withKeyMetaData(keyMetadataGen.genKeyMetadata(colKeyVersion, colKeyThisFile))
+              .build();
+            columnPropertiesMap.put(columnProps.getPath(), columnProps);
+          }
+        } else {
+          // kek not enabled, just pass keyVersion as metadata
+          for (String columnName : cryptoColumns) {
+            ColumnEncryptionProperties columnProps = ColumnEncryptionProperties.builder(columnName)
+              .withKey(columnKey)
+              .withKeyMetaData(colKeyVersion)
+              .build();
+            columnPropertiesMap.put(columnProps.getPath(), columnProps);
+          }
         }
         encryptPropsBuilder.withEncryptedColumns(columnPropertiesMap);
       }

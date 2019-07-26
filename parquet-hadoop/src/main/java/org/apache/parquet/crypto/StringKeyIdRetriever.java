@@ -25,7 +25,7 @@ import java.util.Hashtable;
 // Simple key retriever, based on UTF8 strings as key identifiers
 public class StringKeyIdRetriever implements DecryptionKeyRetriever {
 
-  private final Hashtable<String,byte[]> keyMap;
+  protected final Hashtable<String,byte[]> keyMap;
   
   public StringKeyIdRetriever() {
     keyMap = new Hashtable<String,byte[]>();

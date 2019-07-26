@@ -182,13 +182,14 @@ public class TestEncryption {
     byte[] kek6 = new byte[16];
     random.nextBytes(kek6);
     KeyIdAndEncryptMetadataGenerator keyMetadataGen6 = new KeyIdAndEncryptMetadataGenerator(kek6);
+    byte[] keyIdBytes = "kek".getBytes(StandardCharsets.UTF_8);
     columnProperties0 = ColumnEncryptionProperties.builder("binary_field")
       .withKey(columnKey0)
-      .withKeyMetaData(keyMetadataGen6.genKeyMetadata("kek", columnKey0))
+      .withKeyMetaData(keyMetadataGen6.genKeyMetadata(keyIdBytes, columnKey0))
       .build();
     columnProperties1 = ColumnEncryptionProperties.builder("int32_field")
       .withKey(columnKey1)
-      .withKeyMetaData(keyMetadataGen6.genKeyMetadata("kek", columnKey1))
+      .withKeyMetaData(keyMetadataGen6.genKeyMetadata(keyIdBytes, columnKey1))
       .build();
     columnPropertiesMap = new HashMap<ColumnPath, ColumnEncryptionProperties>();
     columnPropertiesMap.put(columnProperties0.getPath(), columnProperties0);
