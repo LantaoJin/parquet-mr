@@ -210,7 +210,10 @@ public class DictionaryFilterTest {
     BinaryColumn sharp = binaryColumn("single_value_field");
     BinaryColumn b = binaryColumn("binary_field");
 
-    assertTrue("Should drop block with only the excluded value",
+    // because the statistics info cannot be read for this binary column,
+    // and dictionary filter for notEq predicate depends on the statistics info,
+    // see PARQUET-1510, so the block cannot be dropped.
+    assertFalse("Should not drop block with only the excluded value",
         canDrop(notEq(sharp, Binary.fromString("sharp")), ccmd, dictionaries));
 
     assertFalse("Should not drop block with any other value",
