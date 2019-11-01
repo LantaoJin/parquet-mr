@@ -101,15 +101,21 @@ public class SnappyDecompressor implements Decompressor {
     SnappyUtil.validateBuffer(buffer, off, len);
 
     if (inputBuffer.capacity() - inputBuffer.position() < len) {
-      ByteBuffer newBuffer = ByteBuffer.allocateDirect(inputBuffer.position() + len);
+      int expand = inputBuffer.position() + len;
+      // when required mem less than 32M, grow in double, otherwise grow in 1.5 times
+      if (expand < 32 * 1024 * 1024) {
+        expand = 2 * expand;
+      } else {
+        expand = (int)(1.5 * expand);
+      }
+      ByteBuffer newBuffer = ByteBuffer.allocateDirect(expand);
       inputBuffer.rewind();
       newBuffer.put(inputBuffer);
       ByteBuffer oldBuffer = inputBuffer;
       inputBuffer = newBuffer;
       CleanUtil.clean(oldBuffer);
-    } else {
-      inputBuffer.limit(inputBuffer.position() + len);
     }
+    inputBuffer.limit(inputBuffer.position() + len);
     inputBuffer.put(buffer, off, len);
   }
 
