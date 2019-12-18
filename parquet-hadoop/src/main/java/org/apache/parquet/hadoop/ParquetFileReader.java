@@ -432,6 +432,11 @@ public class ParquetFileReader implements Closeable {
     return readFooter(HadoopInputFile.fromPath(file, configuration), filter, fileDecryptionProperties);
   }
 
+  public static ParquetMetadata readFooter(Configuration configuration, FileStatus fileStatus, MetadataFilter filter,
+                                           FileDecryptionProperties fileDecryptionProperties) throws IOException {
+    return readFooter(HadoopInputFile.fromStatus(fileStatus, configuration), filter, fileDecryptionProperties);
+  }
+
   /**
    * @deprecated use {@link ParquetFileReader#readFooter(Configuration, FileStatus, MetadataFilter)}
    */
@@ -641,8 +646,8 @@ public class ParquetFileReader implements Closeable {
       fileDecryptor = new InternalFileDecryptor(fileDecryptionProperties.deepCopy());
     }
     // read crypto metadata for fileDecryptor
-    readFooter(converter, fileStatus.getLen(), fileStatus.getPath().toString(), f,
-      NO_FILTER, fileDecryptionProperties, fileDecryptor);
+//    readFooter(converter, fileStatus.getLen(), fileStatus.getPath().toString(), f,
+//      NO_FILTER, fileDecryptionProperties, fileDecryptor);
     if (null != fileDecryptionProperties && fileDecryptor.plaintextFile() && fileDecryptor.plaintextFilesAllowed()) {
       // Plaintext file. No need in decryptor
       fileDecryptor = null;
