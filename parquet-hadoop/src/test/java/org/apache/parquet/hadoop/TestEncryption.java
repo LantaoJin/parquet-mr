@@ -40,6 +40,8 @@ import org.apache.parquet.crypto.ParquetCipher;
 import org.apache.parquet.crypto.StringKeyIdRetriever;
 import org.apache.parquet.example.data.Group;
 import org.apache.parquet.example.data.simple.SimpleGroupFactory;
+import org.apache.parquet.format.converter.ParquetMetadataConverter;
+import org.apache.parquet.hadoop.api.ReadSupport;
 import org.apache.parquet.hadoop.example.GroupReadSupport;
 import org.apache.parquet.hadoop.example.GroupWriteSupport;
 import org.apache.parquet.hadoop.metadata.ColumnPath;
@@ -264,6 +266,98 @@ public class TestEncryption {
     enforceEmptyDir(conf, root);
   }
 
+  @Test
+  public void testCompatibleRead() throws Exception {
+    Configuration conf = new Configuration();
+    Path root = new Path("target/tests/TestCompatibleRead/");
+    enforceEmptyDir(conf, root);
+
+    Random random = new Random();
+    byte[] footerKey = new byte[16];
+    random.nextBytes(footerKey);
+    byte[] columnKey0 = new byte[16];
+    random.nextBytes(columnKey0);
+    byte[] columnKey1 = new byte[16];
+    random.nextBytes(columnKey1);
+    ColumnEncryptionProperties columnProperties0 = ColumnEncryptionProperties.builder("binary_field")
+      .withKey(columnKey0)
+      .withKeyID("ck0")
+      .build();
+    ColumnEncryptionProperties columnProperties1 = ColumnEncryptionProperties.builder("int32_field")
+      .withKey(columnKey1)
+      .withKeyID("ck1")
+      .build();
+    HashMap<ColumnPath, ColumnEncryptionProperties> columnPropertiesMap = new HashMap<ColumnPath, ColumnEncryptionProperties>();
+    columnPropertiesMap.put(columnProperties0.getPath(), columnProperties0);
+    columnPropertiesMap.put(columnProperties1.getPath(), columnProperties1);
+    FileEncryptionProperties encryptionProperties = FileEncryptionProperties.builder(footerKey)
+      .withPlaintextFooter()
+      .withEncryptedColumns(columnPropertiesMap)
+      .build();
+
+    MessageType schema = parseMessageType(
+      "message test { "
+        + "required binary binary_field; "
+        + "required int32 int32_field; "
+        + "required int64 int64_field; "
+        + "required boolean boolean_field; "
+        + "required float float_field; "
+        + "required double double_field; "
+        + "required fixed_len_byte_array(3) flba_field; "
+        + "required int96 int96_field; "
+        + "} ");
+    GroupWriteSupport.setSchema(schema, conf);
+    SimpleGroupFactory f = new SimpleGroupFactory(schema);
+
+    Path file = new Path(root, "m_0.parquet.encrypted");
+    ParquetWriter<Group> writer = new ParquetWriter<Group>(
+      file,
+      new GroupWriteSupport(),
+      UNCOMPRESSED, 1024, 1024, 512, true, false, ParquetWriter.DEFAULT_WRITER_VERSION, conf,
+      encryptionProperties);
+    for (int i = 0; i < 1000; i++) {
+      writer.write(
+        f.newGroup()
+          .append("binary_field", "test" + i)
+          .append("int32_field", 32)
+          .append("int64_field", 64l)
+          .append("boolean_field", true)
+          .append("float_field", 1.0f)
+          .append("double_field", 2.0d)
+          .append("flba_field", "foo")
+          .append("int96_field", Binary.fromConstantByteArray(new byte[12])));
+    }
+    writer.close();
+
+    String readSchema = "message test {\n"
+      + "required int64 int64_field;\n"
+      + "required boolean boolean_field;\n"
+      + "required float float_field;\n"
+      + "required double double_field;\n"
+      + "required fixed_len_byte_array(3) flba_field;\n"
+      + "required int96 int96_field;\n"
+      + "}";
+    conf.set(ReadSupport.PARQUET_READ_SCHEMA, readSchema);
+
+    ParquetReader<Group> reader = ParquetReader.builder(new GroupReadSupport(), file).withDecryption(null).withConf(conf).build();
+    for (int i = 0; i < 1000; i++) {
+      Group group = reader.read();
+      assertEquals(64l, group.getLong("int64_field", 0));
+      assertEquals(true, group.getBoolean("boolean_field", 0));
+      assertEquals(1.0f, group.getFloat("float_field", 0), 0.001);
+      assertEquals(2.0d, group.getDouble("double_field", 0), 0.001);
+      assertEquals("foo", group.getBinary("flba_field", 0).toStringUsingUTF8());
+      assertEquals(Binary.fromConstantByteArray(new byte[12]),
+        group.getInt96("int96_field",0));
+    }
+    reader.close();
+
+    ParquetFileReader fileReader = ParquetFileReader.open(conf, file, ParquetMetadataConverter.offsets(2000L), null);
+    fileReader.getFooter();
+    fileReader.close();
+
+    enforceEmptyDir(conf, root);
+  }
 
   @Rule
   public TemporaryFolder temp = new TemporaryFolder();

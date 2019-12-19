@@ -276,9 +276,12 @@ public class ParquetMetadataConverter {
       parquetColumns.add(columnChunk);
     }
     RowGroup rowGroup = new RowGroup(parquetColumns, block.getTotalByteSize(), block.getRowCount());
-    rowGroup.setFile_offset(block.getStartingPos());
-    rowGroup.setTotal_compressed_size(block.getCompressedSize());
-    rowGroup.setOrdinal(rowGroupOrdinal);
+    // Initially, set these values only in encrypted files. TODO Remove the if in a later release
+    if (null != fileEncryptor) {
+      rowGroup.setFile_offset(block.getStartingPos());
+      rowGroup.setTotal_compressed_size(block.getCompressedSize());
+      rowGroup.setOrdinal(rowGroupOrdinal);
+    }
     rowGroups.add(rowGroup);
   }
 
