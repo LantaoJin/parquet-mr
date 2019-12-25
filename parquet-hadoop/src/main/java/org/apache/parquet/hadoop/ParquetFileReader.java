@@ -36,6 +36,7 @@ import static org.apache.parquet.hadoop.ParquetInputFormat.STATS_FILTERING_ENABL
 import java.io.ByteArrayInputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.SequenceInputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -53,7 +54,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
-import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -484,7 +484,7 @@ public class ParquetFileReader implements Closeable {
     }
     SeekableInputStream in = file.newStream();
     try {
-      return readFooter(converter, file.getLength(), file.toString(), in, filter, fileDecryptionProperties, null);
+      return readFooter(converter, file, in, filter, fileDecryptionProperties, null);
     } finally {
       if (in != null) {
         in.close();
@@ -492,21 +492,27 @@ public class ParquetFileReader implements Closeable {
     }
   }
 
+  public static final ParquetMetadata readFooter(HadoopInputFile file, SeekableInputStream in, MetadataFilter filter,
+                                                 FileDecryptionProperties fileDecryptionProperties) throws IOException {
+    ParquetMetadataConverter converter = new ParquetMetadataConverter(file.getConfiguration());
+    return readFooter(converter, file, in, filter, fileDecryptionProperties, null);
+  }
+
   /**
    * Reads the meta data block in the footer of the file using provided input stream
-   * @param fileLen length of the file
-   * @param filePath file location
+   * @param file input file
    * @param f input stream for the file
    * @param filter the filter to apply to row groups
    * @return the metadata blocks in the footer
    * @throws IOException if an error occurs while reading the file
    */
-  private static final ParquetMetadata readFooter(ParquetMetadataConverter converter, long fileLen, String filePath, SeekableInputStream f, MetadataFilter filter,
+  private static final ParquetMetadata readFooter(ParquetMetadataConverter converter, InputFile file, SeekableInputStream f, MetadataFilter filter,
                                                   FileDecryptionProperties fileDecryptionProperties, InternalFileDecryptor fileDecryptor) throws IOException {
+    long fileLen = file.getLength();
     LOG.debug("File length {}", fileLen);
     int FOOTER_LENGTH_SIZE = 4;
     if (fileLen < MAGIC.length + FOOTER_LENGTH_SIZE + MAGIC.length) { // MAGIC + data + footer + footerIndex + MAGIC
-      throw new RuntimeException(filePath + " is not a Parquet file (too small)");
+      throw new RuntimeException(file.toString() + " is not a Parquet file (too small)");
     }
 
     byte[] magic = new byte[MAGIC.length];
@@ -522,7 +528,7 @@ public class ParquetFileReader implements Closeable {
     } else if (Arrays.equals(EFMAGIC, magic)) {
       encryptedFooterMode = true;
     } else {
-      throw new RuntimeException(filePath + " is not a Parquet file. Expected magic number at tail, but found " + Arrays.toString(magic));
+      throw new RuntimeException(file.toString() + " is not a Parquet file. Expected magic number at tail, but found " + Arrays.toString(magic));
     }
 
     long fileMetadataIndex = fileMetadataLengthIndex - fileMetadataLength;
@@ -580,8 +586,8 @@ public class ParquetFileReader implements Closeable {
   }
 
   private final CodecFactory codecFactory;
+  private final InputFile file;
   private final SeekableInputStream f;
-  private final FileStatus fileStatus;
   private final Map<ColumnPath, ColumnDescriptor> paths = new HashMap<ColumnPath, ColumnDescriptor>();
   private final FileMetaData fileMetaData; // may be null
   private final Configuration conf;
@@ -630,12 +636,21 @@ public class ParquetFileReader implements Closeable {
       Configuration configuration, FileMetaData fileMetaData,
       Path filePath, List<BlockMetaData> blocks, List<ColumnDescriptor> columns,
       FileDecryptionProperties fileDecryptionProperties) throws IOException {
+    this(configuration, fileMetaData,
+        HadoopStreams.wrap(filePath.getFileSystem(configuration).open(filePath)),
+        HadoopInputFile.fromPath(filePath, configuration),
+        blocks, columns, fileDecryptionProperties);
+  }
+
+  public ParquetFileReader(
+      Configuration configuration, FileMetaData fileMetaData, SeekableInputStream f,
+      InputFile file, List<BlockMetaData> blocks, List<ColumnDescriptor> columns,
+      FileDecryptionProperties fileDecryptionProperties) throws IOException {
     this.converter = new ParquetMetadataConverter(configuration);
     this.conf = configuration;
     this.fileMetaData = fileMetaData;
-    FileSystem fs = filePath.getFileSystem(configuration);
-    this.f = HadoopStreams.wrap(fs.open(filePath));
-    this.fileStatus = fs.getFileStatus(filePath);
+    this.file = file;
+    this.f = f;
     this.blocks = blocks;
     for (ColumnDescriptor col : columns) {
       paths.put(ColumnPath.get(col.getPath()), col);
@@ -645,9 +660,7 @@ public class ParquetFileReader implements Closeable {
     if (null != fileDecryptionProperties) {
       fileDecryptor = new InternalFileDecryptor(fileDecryptionProperties.deepCopy());
     }
-    // read crypto metadata for fileDecryptor
-//    readFooter(converter, fileStatus.getLen(), fileStatus.getPath().toString(), f,
-//      NO_FILTER, fileDecryptionProperties, fileDecryptor);
+
     if (null != fileDecryptionProperties && fileDecryptor.plaintextFile() && fileDecryptor.plaintextFilesAllowed()) {
       // Plaintext file. No need in decryptor
       fileDecryptor = null;
@@ -673,12 +686,12 @@ public class ParquetFileReader implements Closeable {
     this.converter = new ParquetMetadataConverter(conf);
     this.conf = conf;
     FileSystem fs = file.getFileSystem(conf);
-    this.fileStatus = fs.getFileStatus(file);
     this.f = HadoopStreams.wrap(fs.open(file));
+    this.file = HadoopInputFile.fromPath(file, conf);
     if (null != fileDecryptionProperties) {
       fileDecryptor = new InternalFileDecryptor(fileDecryptionProperties);
     }
-    this.footer = readFooter(converter, fileStatus.getLen(), fileStatus.getPath().toString(), f, filter, fileDecryptionProperties, fileDecryptor);
+    this.footer = readFooter(converter, this.file, f, filter, fileDecryptionProperties, fileDecryptor);
     if (null != fileDecryptionProperties && fileDecryptor.plaintextFile() && fileDecryptor.plaintextFilesAllowed()) {
       // Plaintext file. No need in decryptor
       fileDecryptor = null;
@@ -707,13 +720,13 @@ public class ParquetFileReader implements Closeable {
     this.converter = new ParquetMetadataConverter(conf);
     this.conf = conf;
     FileSystem fs = file.getFileSystem(conf);
-    this.fileStatus = fs.getFileStatus(file);
     this.f = HadoopStreams.wrap(fs.open(file));
+    this.file = HadoopInputFile.fromPath(file, conf);
     if (null != fileDecryptionProperties) {
       fileDecryptor = new InternalFileDecryptor(fileDecryptionProperties);
     }
     //todo re-read the footer since the fileDecryptor need to be initialized
-    this.footer = readFooter(converter, fileStatus.getLen(), fileStatus.getPath().toString(), f, NO_FILTER, fileDecryptionProperties, fileDecryptor);
+    this.footer = readFooter(converter, this.file, f, NO_FILTER, fileDecryptionProperties, fileDecryptor);
     if (null != fileDecryptionProperties && fileDecryptor.plaintextFile() && fileDecryptor.plaintextFilesAllowed()) {
       // Plaintext file. No need in decryptor
       fileDecryptor = null;
@@ -732,7 +745,7 @@ public class ParquetFileReader implements Closeable {
     if (footer == null) {
       try {
         // don't read the row groups because this.blocks is always set
-        this.footer = readFooter(converter, fileStatus.getLen(), fileStatus.getPath().toString(), f, SKIP_ROW_GROUPS, null, fileDecryptor);
+        this.footer = readFooter(converter, file, f, SKIP_ROW_GROUPS, null, fileDecryptor);
       } catch (IOException e) {
         throw new ParquetDecodingException("Unable to read file footer", e);
       }
@@ -756,7 +769,7 @@ public class ParquetFileReader implements Closeable {
   }
 
   public Path getPath() {
-    return fileStatus.getPath();
+    return new Path(file.toString());
   }
 
   void filterRowGroups(FilterCompat.Filter filter) throws IOException {
