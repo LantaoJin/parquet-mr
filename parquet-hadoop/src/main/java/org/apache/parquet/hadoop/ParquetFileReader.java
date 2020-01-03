@@ -325,7 +325,7 @@ public class ParquetFileReader implements Closeable {
    * Read the footers of all the files under that path (recursively)
    * using summary files if possible
    * @param configuration the configuration to access the FS
-   * @param fileStatus the root dir
+   * @param pathStatus the root dir
    * @return all the footers
    * @throws IOException
    */
@@ -659,6 +659,7 @@ public class ParquetFileReader implements Closeable {
 
     if (null != fileDecryptionProperties) {
       fileDecryptor = new InternalFileDecryptor(fileDecryptionProperties.deepCopy());
+      readFooter(converter, file, f, NO_FILTER, fileDecryptionProperties, fileDecryptor);
     }
 
     if (null != fileDecryptionProperties && fileDecryptor.plaintextFile() && fileDecryptor.plaintextFilesAllowed()) {
