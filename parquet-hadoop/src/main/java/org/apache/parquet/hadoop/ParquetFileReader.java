@@ -811,6 +811,9 @@ public class ParquetFileReader implements Closeable {
    * @return the PageReadStore which can provide PageReaders for each column.
    */
   public PageReadStore readNextRowGroup() throws IOException {
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("start to read next row group");
+    }
     if (currentBlock == blocks.size()) {
       return null;
     }
@@ -860,7 +863,9 @@ public class ParquetFileReader implements Closeable {
     }
 
     advanceToNextBlock();
-
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("finish read next row group");
+    }
     return currentRowGroup;
   }
 
@@ -1282,10 +1287,16 @@ public class ParquetFileReader implements Closeable {
      * @throws IOException
      */
     public List<Chunk> readAll(SeekableInputStream f) throws IOException {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("start to read chunks: offset:{}, length:{}", offset, length);
+      }
       List<Chunk> result = new ArrayList<Chunk>(chunks.size());
       f.seek(offset);
       byte[] chunksBytes = new byte[length];
       f.readFully(chunksBytes);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("finish read chunks");
+      }
       // report in a counter the data we just scanned
       BenchmarkCounter.incrementBytesRead(length);
       int currentChunkOffset = 0;
