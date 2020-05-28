@@ -36,8 +36,11 @@ import org.apache.hadoop.util.ReflectionUtils;
 
 import org.apache.parquet.bytes.BytesInput;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class CodecFactory {
+  private static final Logger LOG = LoggerFactory.getLogger(CodecFactory.class);
 
   public class BytesDecompressor {
 
@@ -48,6 +51,7 @@ class CodecFactory {
       this.codec = codec;
       if (codec != null) {
         decompressor = CodecPool.getDecompressor(codec);
+        LOG.info("Got decompressor:{} from pool", decompressor);
       } else {
         decompressor = null;
       }
@@ -68,6 +72,7 @@ class CodecFactory {
     private void release() {
       if (decompressor != null) {
         CodecPool.returnDecompressor(decompressor);
+        LOG.info("Return decompressor:{} to pool", decompressor);
       }
     }
   }

@@ -979,6 +979,7 @@ public class ParquetFileReader implements Closeable {
 
   @Override
   public void close() throws IOException {
+    LOG.info("close parquet file:{}", file == null ? "" : file.toString());
     try {
       if (f != null) {
         f.close();
