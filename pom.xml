@@ -9,7 +9,7 @@
 
   <groupId>org.apache.parquet</groupId>
   <artifactId>parquet</artifactId>
-  <version>1.11.1</version>
+  <version>1.11.1-ebay-carmel1-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <name>Apache Parquet MR</name>
@@ -601,4 +601,17 @@
       </properties>
     </profile>
   </profiles>
+
+  <distributionManagement>
+    <snapshotRepository>
+      <id>ebaycentral.snapshots</id>
+      <name>ebaycentral</name>
+      <url>http://ebaycentral.qa.ebay.com/content/repositories/snapshots</url>
+    </snapshotRepository>
+    <repository>
+      <id>ebaycentral.releases</id>
+      <name>ebaycentral</name>
+      <url>http://ebaycentral.qa.ebay.com/content/repositories/releases</url>
+    </repository>
+  </distributionManagement>
 </project>
