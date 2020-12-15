@@ -495,6 +495,12 @@ public class ParquetFileReader implements Closeable {
    */
   @Deprecated
   public static final ParquetMetadata readFooter(InputFile file, MetadataFilter filter) throws IOException {
+    try (SeekableInputStream in = file.newStream()) {
+      return readFooter(file, filter, in);
+    }
+  }
+
+  public static final ParquetMetadata readFooter(InputFile file, MetadataFilter filter, SeekableInputStream in) throws IOException {
     ParquetReadOptions options;
     if (file instanceof HadoopInputFile) {
       options = HadoopReadOptions.builder(((HadoopInputFile) file).getConfiguration())
@@ -503,9 +509,7 @@ public class ParquetFileReader implements Closeable {
       options = ParquetReadOptions.builder().withMetadataFilter(filter).build();
     }
 
-    try (SeekableInputStream in = file.newStream()) {
-      return readFooter(file, options, in);
-    }
+    return readFooter(file, options, in);
   }
 
   private static final ParquetMetadata readFooter(InputFile file, ParquetReadOptions options, SeekableInputStream f) throws IOException {
@@ -658,6 +662,23 @@ public class ParquetFileReader implements Closeable {
     this.f = file.newStream();
     this.options = HadoopReadOptions.builder(configuration).build();
     this.blocks = filterRowGroups(blocks);
+    this.blockIndexStores = listWithNulls(this.blocks.size());
+    this.blockRowRanges = listWithNulls(this.blocks.size());
+    for (ColumnDescriptor col : columns) {
+      paths.put(ColumnPath.get(col.getPath()), col);
+    }
+    this.crc = options.usePageChecksumVerification() ? new CRC32() : null;
+  }
+
+  public ParquetFileReader(
+      Configuration configuration, FileMetaData fileMetaData, SeekableInputStream f,
+      InputFile file, List<BlockMetaData> blocks, List<ColumnDescriptor> columns) {
+    this.converter = new ParquetMetadataConverter(configuration);
+    this.fileMetaData = fileMetaData;
+    this.file = file;
+    this.f = f;
+    this.options = HadoopReadOptions.builder(configuration).build();
+    this.blocks = blocks;
     this.blockIndexStores = listWithNulls(this.blocks.size());
     this.blockRowRanges = listWithNulls(this.blocks.size());
     for (ColumnDescriptor col : columns) {
